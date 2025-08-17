@@ -12,14 +12,39 @@ import queue
 import warnings
 warnings.filterwarnings("ignore")
 
-# LLM için gerekli kütüphaneler
+# LLM için gerekli kütüphaneler - Gelişmiş hata kontrolü
+LLM_AVAILABLE = False
+LLM_ERROR_MESSAGE = ""
+
 try:
-    from transformers import pipeline, AutoTokenizer, AutoModelForCausalLM
     import torch
+    # PyTorch test - DLL loading problemi kontrolü
+    torch.tensor([1.0])  # Basit bir tensor oluştur
+    
+    from transformers import pipeline, AutoTokenizer, AutoModelForCausalLM
     LLM_AVAILABLE = True
-except ImportError:
-    LLM_AVAILABLE = False
-    print("⚠️ LLM kütüphaneleri bulunamadı. 'pip install transformers torch' çalıştırın.")
+    print("✅ LLM kütüphaneleri başarıyla yüklendi")
+    
+except ImportError as e:
+    LLM_ERROR_MESSAGE = f"Import Error: {str(e)}"
+    print(f"⚠️ LLM kütüphaneleri bulunamadı: {LLM_ERROR_MESSAGE}")
+    print("💡 Çözüm: pip install transformers torch")
+    
+except OSError as e:
+    if "c10.dll" in str(e) or "WinError 126" in str(e):
+        LLM_ERROR_MESSAGE = "Visual C++ Redistributable eksik"
+        print("🚨 Windows Visual C++ Redistributable eksik!")
+        print("📥 İndir: https://aka.ms/vs/16/release/vc_redist.x64.exe")
+        print("🔄 Alternatif: CPU-only PyTorch yükleyin")
+        print("   pip uninstall torch")
+        print("   pip install torch --index-url https://download.pytorch.org/whl/cpu")
+    else:
+        LLM_ERROR_MESSAGE = f"DLL Error: {str(e)}"
+        print(f"⚠️ DLL yükleme hatası: {LLM_ERROR_MESSAGE}")
+        
+except Exception as e:
+    LLM_ERROR_MESSAGE = f"Unknown Error: {str(e)}"
+    print(f"❌ Bilinmeyen LLM hatası: {LLM_ERROR_MESSAGE}")
 
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import Qt, QPoint, QRect, QPropertyAnimation, QEasingCurve, QTimer, QSequentialAnimationGroup, \
@@ -98,30 +123,52 @@ class LocalLLM(QtCore.QObject):
         self.worker_thread.start()
     
     def _load_model(self):
-        """Küçük ve hızlı model yükle"""
+        """Küçük ve hızlı model yükle - Windows uyumlu"""
         try:
+            # Önce torch'un düzgün çalıştığını kontrol et
+            if not LLM_AVAILABLE:
+                raise Exception(f"LLM not available: {LLM_ERROR_MESSAGE}")
+            
+            # CPU-first approach for Windows compatibility
+            device = "cpu"  # Windows'ta DLL problemi varsa CPU kullan
+            
             # DistilGPT-2 - Hızlı ve küçük model
             model_name = "distilgpt2"
             
-            self.tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side='left')
+            print(f"🔄 Model yükleniyor: {model_name} (device: {device})")
+            
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                model_name, 
+                padding_side='left',
+                local_files_only=False  # İlk kez indirmeye izin ver
+            )
+            
             if self.tokenizer.pad_token is None:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
                 
             self.model = AutoModelForCausalLM.from_pretrained(
                 model_name,
-                torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-                device_map="auto" if torch.cuda.is_available() else None
+                torch_dtype=torch.float32,  # Windows için float32 kullan
+                device_map=None,  # Manuel device assignment
+                local_files_only=False
             )
+            
+            # Model'i CPU'ya taşı
+            self.model = self.model.to(device)
+            self.model.eval()  # Evaluation mode
             
             self.is_ready = True
             self.is_loading = False
-            print("✅ LLM hazır - DistilGPT-2 yüklendi")
+            print("✅ LLM hazır - DistilGPT-2 yüklendi (CPU mode)")
             
             # Worker thread başlat
             threading.Thread(target=self._process_requests, daemon=True).start()
             
         except Exception as e:
             print(f"❌ LLM yükleme hatası: {e}")
+            if "c10.dll" in str(e):
+                print("💡 Windows Visual C++ Redistributable gerekli!")
+                print("📥 İndir: https://aka.ms/vs/16/release/vc_redist.x64.exe")
             self.is_loading = False
             self.is_ready = False
     
@@ -140,18 +187,24 @@ class LocalLLM(QtCore.QObject):
     
     def ask(self, question: str):
         """Soru sor - async"""
+        if not LLM_AVAILABLE:
+            return self._fallback_response(question)
+            
         if not self.is_ready:
             if not self.is_loading:
                 self._initialize_llm()
-            return self._fallback_response(question)
+            return f"🤖 LLM yükleniyor... ({LLM_ERROR_MESSAGE if LLM_ERROR_MESSAGE else 'Hazırlanıyor'})"
         
         # Queue'ya ekle
         self.request_queue.put(question)
         return "🤖 LLM düşünüyor..."
     
     def _generate_response(self, prompt: str) -> str:
-        """LLM ile cevap üret"""
+        """LLM ile cevap üret - Windows uyumlu"""
         try:
+            if not self.is_ready or not LLM_AVAILABLE:
+                return self._fallback_response(prompt)
+            
             # AirDarwin context ekle
             context = """AirDarwin otopilot sistemi için akıllı asistan.
 Uçuş güvenliği ve teknik destek sağlar.
@@ -161,16 +214,26 @@ Soru: """
             
             full_prompt = context + prompt + "\nCevap:"
             
-            inputs = self.tokenizer(full_prompt, return_tensors="pt", truncation=True, max_length=200)
+            inputs = self.tokenizer(
+                full_prompt, 
+                return_tensors="pt", 
+                truncation=True, 
+                max_length=200,
+                padding=True
+            )
+            
+            # CPU'da generate
+            inputs = {k: v.to('cpu') for k, v in inputs.items()}
             
             with torch.no_grad():
                 outputs = self.model.generate(
                     **inputs,
-                    max_new_tokens=100,
-                    temperature=0.7,
+                    max_new_tokens=50,  # Daha az token Windows için
+                    temperature=0.8,
                     do_sample=True,
                     pad_token_id=self.tokenizer.eos_token_id,
-                    eos_token_id=self.tokenizer.eos_token_id
+                    eos_token_id=self.tokenizer.eos_token_id,
+                    num_return_sequences=1
                 )
             
             response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
@@ -180,8 +243,8 @@ Soru: """
                 response = response.split("Cevap:")[-1].strip()
             
             # Temizle ve kısalt
-            response = response[:200].strip()
-            if not response:
+            response = response[:150].strip()
+            if not response or len(response) < 5:
                 return self._fallback_response(prompt)
                 
             return f"🤖 {response}"
@@ -222,6 +285,8 @@ Soru: """
             return "💨 Rüzgar limitleri: Max 25 km/h genel, 15 km/h yan rüzgar."
         elif any(word in question_lower for word in ['emergency', 'acil', 'kritik']):
             return "🚨 Acil durumda: Motor durdur, RTL aktif et, manuel kontrol al."
+        elif any(word in question_lower for word in ['windows', 'dll', 'hata', 'error']):
+            return "🔧 Windows DLL hatası: Visual C++ Redistributable yükleyin veya CPU-only PyTorch kullanın."
         else:
             return "❓ AirDarwin hakkında daha spesifik soru sorabilirsiniz. Örnek: battery, gps, speed, altitude"
 
@@ -1263,11 +1328,18 @@ class MainWindow(QWidget):
         main_layout.addLayout(content_layout, 1)
 
         # İlk mesaj
-        QTimer.singleShot(500, lambda: self.chat_area.add_message(
-            "🚀 AirDarwin Ground Control Station Online\n" +
-            "📡 Waiting for telemetry data from AirDarwin autopilot\n" +
-            "🤖 Local AI Assistant ready for questions\n" +
-            "Select COM port from top-right selector to connect...", False))
+        startup_message = "🚀 AirDarwin Ground Control Station Online\n📡 Waiting for telemetry data from AirDarwin autopilot\n"
+        
+        if LLM_AVAILABLE:
+            startup_message += "🤖 Local AI Assistant ready for questions\n"
+        else:
+            startup_message += f"⚠️ AI Assistant offline: {LLM_ERROR_MESSAGE}\n"
+            if "Visual C++" in LLM_ERROR_MESSAGE:
+                startup_message += "💡 Çözüm: Visual C++ Redistributable yükleyin\n"
+                
+        startup_message += "Select COM port from top-right selector to connect..."
+        
+        QTimer.singleShot(500, lambda: self.chat_area.add_message(startup_message, False))
 
     def _on_port_changed(self, port_name):
         """Handle COM port selection change"""
@@ -1403,8 +1475,17 @@ def main():
     print("⌨️  ESC: Exit | F11: Fullscreen toggle | Tab: Auto-complete")
     print("💬 Commands: motor_on, takeoff, landing, status, help")
     print("🤖 AI Assistant: Soru işareti ile biten sorular AI'ya yönlendirilir")
+    
     if not LLM_AVAILABLE:
-        print("⚠️  LLM desteği için: pip install transformers torch")
+        print("⚠️  LLM desteği için:")
+        if "Visual C++" in LLM_ERROR_MESSAGE:
+            print("   1. Visual C++ Redistributable yükleyin:")
+            print("      https://aka.ms/vs/16/release/vc_redist.x64.exe")
+            print("   2. Veya CPU-only PyTorch:")
+            print("      pip uninstall torch")
+            print("      pip install torch --index-url https://download.pytorch.org/whl/cpu")
+        else:
+            print("   pip install transformers torch")
 
     sys.exit(app.exec())
 
