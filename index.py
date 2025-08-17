@@ -123,43 +123,69 @@ class LocalLLM(QtCore.QObject):
         self.worker_thread.start()
     
     def _load_model(self):
-        """Küçük ve hızlı model yükle - Windows uyumlu"""
+        """Küçük ve hızlı model yükle - Windows uyumlu alternatifler"""
         try:
             # Önce torch'un düzgün çalıştığını kontrol et
             if not LLM_AVAILABLE:
                 raise Exception(f"LLM not available: {LLM_ERROR_MESSAGE}")
             
             # CPU-first approach for Windows compatibility
-            device = "cpu"  # Windows'ta DLL problemi varsa CPU kullan
+            device = "cpu"
             
-            # DistilGPT-2 - Hızlı ve küçük model
-            model_name = "distilgpt2"
+            # Model seçenekleri - küçükten büyüğe
+            model_options = [
+                "microsoft/DialoGPT-small",    # 117M parameters - En hafif
+                "gpt2",                        # 124M parameters - Klasik GPT-2
+                "distilgpt2",                  # 82M parameters - DistilGPT-2
+                "microsoft/DialoGPT-medium"    # 345M parameters - Biraz daha büyük
+            ]
             
-            print(f"🔄 Model yükleniyor: {model_name} (device: {device})")
+            model_loaded = False
+            selected_model = None
             
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                model_name, 
-                padding_side='left',
-                local_files_only=False  # İlk kez indirmeye izin ver
-            )
+            for model_name in model_options:
+                try:
+                    print(f"🔄 Model deneniyor: {model_name}")
+                    
+                    # Tokenizer yükle
+                    self.tokenizer = AutoTokenizer.from_pretrained(
+                        model_name, 
+                        padding_side='left',
+                        local_files_only=False,
+                        trust_remote_code=False
+                    )
+                    
+                    if self.tokenizer.pad_token is None:
+                        self.tokenizer.pad_token = self.tokenizer.eos_token
+                        
+                    # Model yükle
+                    self.model = AutoModelForCausalLM.from_pretrained(
+                        model_name,
+                        torch_dtype=torch.float32,  # Windows için float32
+                        device_map=None,
+                        local_files_only=False,
+                        trust_remote_code=False,
+                        low_cpu_mem_usage=True  # Bellek optimizasyonu
+                    )
+                    
+                    # Model'i CPU'ya taşı
+                    self.model = self.model.to(device)
+                    self.model.eval()  # Evaluation mode
+                    
+                    selected_model = model_name
+                    model_loaded = True
+                    break
+                    
+                except Exception as model_error:
+                    print(f"❌ {model_name} yüklenemedi: {model_error}")
+                    continue
             
-            if self.tokenizer.pad_token is None:
-                self.tokenizer.pad_token = self.tokenizer.eos_token
-                
-            self.model = AutoModelForCausalLM.from_pretrained(
-                model_name,
-                torch_dtype=torch.float32,  # Windows için float32 kullan
-                device_map=None,  # Manuel device assignment
-                local_files_only=False
-            )
-            
-            # Model'i CPU'ya taşı
-            self.model = self.model.to(device)
-            self.model.eval()  # Evaluation mode
+            if not model_loaded:
+                raise Exception("Hiçbir model yüklenemedi")
             
             self.is_ready = True
             self.is_loading = False
-            print("✅ LLM hazır - DistilGPT-2 yüklendi (CPU mode)")
+            print(f"✅ LLM hazır - {selected_model} yüklendi (CPU mode)")
             
             # Worker thread başlat
             threading.Thread(target=self._process_requests, daemon=True).start()
@@ -169,6 +195,10 @@ class LocalLLM(QtCore.QObject):
             if "c10.dll" in str(e):
                 print("💡 Windows Visual C++ Redistributable gerekli!")
                 print("📥 İndir: https://aka.ms/vs/16/release/vc_redist.x64.exe")
+            elif "torch" in str(e).lower():
+                print("💡 PyTorch problemi - CPU-only sürüm deneyin:")
+                print("   pip uninstall torch")
+                print("   pip install torch --index-url https://download.pytorch.org/whl/cpu")
             self.is_loading = False
             self.is_ready = False
     
@@ -200,54 +230,66 @@ class LocalLLM(QtCore.QObject):
         return "🤖 LLM düşünüyor..."
     
     def _generate_response(self, prompt: str) -> str:
-        """LLM ile cevap üret - Windows uyumlu"""
+        """LLM ile cevap üret - Windows uyumlu - Gelişmiş model desteği"""
         try:
             if not self.is_ready or not LLM_AVAILABLE:
                 return self._fallback_response(prompt)
             
-            # AirDarwin context ekle
-            context = """AirDarwin otopilot sistemi için akıllı asistan.
-Uçuş güvenliği ve teknik destek sağlar.
-Kısa ve net cevaplar verir.
-
-Soru: """
+            # AirDarwin context - model tipine göre optimize
+            if "DialoGPT" in str(type(self.model)):
+                # DialoGPT için conversation format
+                context = f"Human: {prompt}\nBot:"
+            else:
+                # GPT-2 için instruction format
+                context = f"Question about AirDarwin flight system: {prompt}\nAnswer:"
             
-            full_prompt = context + prompt + "\nCevap:"
-            
-            inputs = self.tokenizer(
-                full_prompt, 
-                return_tensors="pt", 
-                truncation=True, 
-                max_length=200,
-                padding=True
-            )
-            
-            # CPU'da generate
-            inputs = {k: v.to('cpu') for k, v in inputs.items()}
-            
-            with torch.no_grad():
-                outputs = self.model.generate(
-                    **inputs,
-                    max_new_tokens=50,  # Daha az token Windows için
-                    temperature=0.8,
-                    do_sample=True,
-                    pad_token_id=self.tokenizer.eos_token_id,
-                    eos_token_id=self.tokenizer.eos_token_id,
-                    num_return_sequences=1
+            try:
+                inputs = self.tokenizer(
+                    context, 
+                    return_tensors="pt", 
+                    truncation=True, 
+                    max_length=150,  # Daha kısa context
+                    padding=True
                 )
-            
-            response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-            
-            # Sadece yeni üretilen kısmı al
-            if "Cevap:" in response:
-                response = response.split("Cevap:")[-1].strip()
-            
-            # Temizle ve kısalt
-            response = response[:150].strip()
-            if not response or len(response) < 5:
-                return self._fallback_response(prompt)
                 
-            return f"🤖 {response}"
+                # CPU'da generate
+                inputs = {k: v.to('cpu') for k, v in inputs.items()}
+                
+                with torch.no_grad():
+                    outputs = self.model.generate(
+                        **inputs,
+                        max_new_tokens=30,  # Daha kısa cevaplar
+                        temperature=0.7,
+                        do_sample=True,
+                        pad_token_id=self.tokenizer.eos_token_id,
+                        eos_token_id=self.tokenizer.eos_token_id,
+                        num_return_sequences=1,
+                        repetition_penalty=1.1,  # Tekrarları önle
+                        no_repeat_ngram_size=2
+                    )
+                
+                response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+                
+                # Response'u temizle
+                if "Answer:" in response:
+                    response = response.split("Answer:")[-1].strip()
+                elif "Bot:" in response:
+                    response = response.split("Bot:")[-1].strip()
+                elif context in response:
+                    response = response.replace(context, "").strip()
+                
+                # Temizle ve kısalt
+                response = response[:100].strip()
+                
+                # Boş veya çok kısa cevapları fallback'e yönlendir
+                if not response or len(response) < 3:
+                    return self._fallback_response(prompt)
+                    
+                return f"🤖 {response}"
+                
+            except Exception as gen_error:
+                print(f"Generation error: {gen_error}")
+                return self._fallback_response(prompt)
             
         except Exception as e:
             print(f"LLM üretim hatası: {e}")
@@ -287,6 +329,8 @@ Soru: """
             return "🚨 Acil durumda: Motor durdur, RTL aktif et, manuel kontrol al."
         elif any(word in question_lower for word in ['windows', 'dll', 'hata', 'error']):
             return "🔧 Windows DLL hatası: Visual C++ Redistributable yükleyin veya CPU-only PyTorch kullanın."
+        elif any(word in question_lower for word in ['model', 'llm', 'ai']):
+            return "🤖 AI Model: Microsoft DialoGPT, GPT-2 veya DistilGPT-2 otomatik seçimi yapılır."
         else:
             return "❓ AirDarwin hakkında daha spesifik soru sorabilirsiniz. Örnek: battery, gps, speed, altitude"
 
@@ -1484,8 +1528,10 @@ def main():
             print("   2. Veya CPU-only PyTorch:")
             print("      pip uninstall torch")
             print("      pip install torch --index-url https://download.pytorch.org/whl/cpu")
+            print("      pip install transformers")
         else:
             print("   pip install transformers torch")
+        print("💡 Modeller: DialoGPT-small, GPT-2, DistilGPT-2 otomatik denenecek")
 
     sys.exit(app.exec())
 
