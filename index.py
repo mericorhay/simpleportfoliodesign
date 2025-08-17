@@ -7,44 +7,14 @@ import serial
 import serial.tools.list_ports
 from dataclasses import dataclass
 from typing import List, Optional
-import threading
-import queue
 import warnings
 warnings.filterwarnings("ignore")
 
-# LLM için gerekli kütüphaneler - Gelişmiş hata kontrolü
-LLM_AVAILABLE = False
+# Basit AI Assistant - PyTorch olmadan
+LLM_AVAILABLE = True
 LLM_ERROR_MESSAGE = ""
 
-try:
-    import torch
-    # PyTorch test - DLL loading problemi kontrolü
-    torch.tensor([1.0])  # Basit bir tensor oluştur
-    
-    from transformers import pipeline, AutoTokenizer, AutoModelForCausalLM
-    LLM_AVAILABLE = True
-    print("✅ LLM kütüphaneleri başarıyla yüklendi")
-    
-except ImportError as e:
-    LLM_ERROR_MESSAGE = f"Import Error: {str(e)}"
-    print(f"⚠️ LLM kütüphaneleri bulunamadı: {LLM_ERROR_MESSAGE}")
-    print("💡 Çözüm: pip install transformers torch")
-    
-except OSError as e:
-    if "c10.dll" in str(e) or "WinError 126" in str(e):
-        LLM_ERROR_MESSAGE = "Visual C++ Redistributable eksik"
-        print("🚨 Windows Visual C++ Redistributable eksik!")
-        print("📥 İndir: https://aka.ms/vs/16/release/vc_redist.x64.exe")
-        print("🔄 Alternatif: CPU-only PyTorch yükleyin")
-        print("   pip uninstall torch")
-        print("   pip install torch --index-url https://download.pytorch.org/whl/cpu")
-    else:
-        LLM_ERROR_MESSAGE = f"DLL Error: {str(e)}"
-        print(f"⚠️ DLL yükleme hatası: {LLM_ERROR_MESSAGE}")
-        
-except Exception as e:
-    LLM_ERROR_MESSAGE = f"Unknown Error: {str(e)}"
-    print(f"❌ Bilinmeyen LLM hatası: {LLM_ERROR_MESSAGE}")
+print("✅ Basit AI Assistant yüklendi (PyTorch olmadan)")
 
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import Qt, QPoint, QRect, QPropertyAnimation, QEasingCurve, QTimer, QSequentialAnimationGroup, \
@@ -1374,13 +1344,8 @@ class MainWindow(QWidget):
         # İlk mesaj
         startup_message = "🚀 AirDarwin Ground Control Station Online\n📡 Waiting for telemetry data from AirDarwin autopilot\n"
         
-        if LLM_AVAILABLE:
-            startup_message += "🤖 Local AI Assistant ready for questions\n"
-        else:
-            startup_message += f"⚠️ AI Assistant offline: {LLM_ERROR_MESSAGE}\n"
-            if "Visual C++" in LLM_ERROR_MESSAGE:
-                startup_message += "💡 Çözüm: Visual C++ Redistributable yükleyin\n"
-                
+        startup_message += "🤖 Basit AI Assistant hazır (PyTorch olmadan)\n"
+        startup_message += "💬 Örnek sorular: battery?, gps nedir?, emergency prosedürü?\n"
         startup_message += "Select COM port from top-right selector to connect..."
         
         QTimer.singleShot(500, lambda: self.chat_area.add_message(startup_message, False))
@@ -1518,20 +1483,8 @@ def main():
     print("🚀 AirDarwin Modern UI launched!")
     print("⌨️  ESC: Exit | F11: Fullscreen toggle | Tab: Auto-complete")
     print("💬 Commands: motor_on, takeoff, landing, status, help")
-    print("🤖 AI Assistant: Soru işareti ile biten sorular AI'ya yönlendirilir")
-    
-    if not LLM_AVAILABLE:
-        print("⚠️  LLM desteği için:")
-        if "Visual C++" in LLM_ERROR_MESSAGE:
-            print("   1. Visual C++ Redistributable yükleyin:")
-            print("      https://aka.ms/vs/16/release/vc_redist.x64.exe")
-            print("   2. Veya CPU-only PyTorch:")
-            print("      pip uninstall torch")
-            print("      pip install torch --index-url https://download.pytorch.org/whl/cpu")
-            print("      pip install transformers")
-        else:
-            print("   pip install transformers torch")
-        print("💡 Modeller: DialoGPT-small, GPT-2, DistilGPT-2 otomatik denenecek")
+    print("🤖 Basit AI Assistant: Hızlı ve güvenilir cevaplar (PyTorch olmadan)")
+    print("💡 Örnek sorular: battery?, gps nedir?, emergency?, takeoff prosedürü?")
 
     sys.exit(app.exec())
 
